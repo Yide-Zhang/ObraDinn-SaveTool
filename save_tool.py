@@ -421,7 +421,9 @@ def main(argv=None):
     p.add_argument("--slot", required=True, choices=SLOTS)
 
     args = ap.parse_args(argv)
-    crew, ship, office = build_zones()
+    # 必须走 _zones()（带 gui/data.py 兜底），不能直接 build_zones()：
+    # 精简版仓库 / 打包后的 exe 里没有 txtAssetDump/，直接调会当场炸。
+    crew, ship, office = _zones()
 
     if args.cmd == "info":
         for f in args.files:
