@@ -1,0 +1,17 @@
+{
+  "ObraDinnSave-END-FAIL.txt": {
+    "name": "坏结局存档"
+  },
+  "ObraDinnSave-END-MID.txt": {
+    "name": "中等结局存档"
+  },
+  "ObraDinnSave-END-WIN.txt": {
+    "name": "好结局存档"
+  },
+  "ObraDinnSave-BLANK.txt": {
+    "name": "直接推理存档"
+  },
+  "ObraDinnSave-KILLERCAPTAIN.txt": {
+    "name": "“船长干的”存档"
+  }
+}

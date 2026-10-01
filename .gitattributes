@@ -1,0 +1,15 @@
+# 通用规则放最前 —— gitattributes 是「后面的规则覆盖前面的」，
+# 所以下面那些例外必须排在它后面才生效。
+
+# 文本文件统一按 LF 存库，检出也保持 LF（.py 在 Windows 上跑没问题）
+* text=auto eol=lf
+
+# ★ 预制存档是「单行 XML + Base64」容器，整个文件里没有任何换行符。
+#   万一 git 对它做换行转换就会毁掉存档 —— 显式声明完全不要碰它。
+gui/presets/*.txt -text -diff
+
+# 字体 / 图标是二进制
+gui/fonts/*.ttf binary
+gui/fonts/*.otf binary
+*.png binary
+*.icns binary
