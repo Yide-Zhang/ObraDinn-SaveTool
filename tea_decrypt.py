@@ -59,6 +59,42 @@ def xxtea_decrypt(v, k):
     return v
 
 
+def xxtea_encrypt(v, k):
+    """XXTEA 加密（就地修改 v）——xxtea_decrypt 的逆运算。
+
+    和 decrypt 一样，两处 MX 的下标必须用「本次操作的那个 p」：
+    循环里是 p，收尾那一步是 n-1（decrypt 收尾那一步是 0）。
+    """
+    n = len(v)
+    if n < 2:
+        return v
+    q = 6 + 52 // n
+    summ = 0
+    z = v[n - 1]
+    for _ in range(q):
+        summ = (summ + DELTA) & MASK
+        e = (summ >> 2) & 3
+        for p in range(n - 1):
+            y = v[p + 1]
+            mx = ((((z >> 5) ^ (y << 2)) + ((y >> 3) ^ (z << 4)))
+                  ^ ((summ ^ y) + (k[(p & 3) ^ e] ^ z))) & MASK
+            v[p] = (v[p] + mx) & MASK
+            z = v[p]
+        y = v[0]
+        mx = ((((z >> 5) ^ (y << 2)) + ((y >> 3) ^ (z << 4)))
+              ^ ((summ ^ y) + (k[((n - 1) & 3) ^ e] ^ z))) & MASK
+        v[n - 1] = (v[n - 1] + mx) & MASK
+        z = v[n - 1]
+    return v
+
+
+def encrypt(text: str) -> str:
+    """明文（UTF-8）→ base64 密文。和游戏 TeaEncryptor 一致：ToLongs 不足 4 字节补 0。"""
+    data = text.encode("utf-8")
+    v = xxtea_encrypt(to_longs(data), to_longs(KEY))
+    return base64.b64encode(to_bytes(v)).decode("ascii")
+
+
 def decrypt(encrypted_b64: str) -> bytes:
     data = base64.b64decode(encrypted_b64)
     print(f"[i] 密文长度: {len(data)} 字节 ({len(data)//4} 个 uint32)")

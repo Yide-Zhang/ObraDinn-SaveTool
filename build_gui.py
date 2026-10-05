@@ -29,6 +29,12 @@ ENTRY = ROOT / "run_gui.py"
 APP = "ObraDinnSaveTool"
 BUNDLE_ID = "com.obradinn.savetool"
 
+#: exe 图标：由 icon_save.png 生成。**必须含 16×16** —— 资源管理器「小图标」
+#: 视图只认那一档，缺了就回落成 exe 自带的默认图标（这个坑踩过一次）。
+ICON_PNG = ROOT / "icon_save.png"
+ICON_ICO = ROOT / "icon_save.ico"
+ICO_SIZES = (16, 24, 32, 48, 64, 128, 256)
+
 # 动态 import / 条件 import 的兜底，避免 PyInstaller 漏收。
 # 注意：那几个 make_*_save 只有造预制存档时才用得上，精简版仓库里不一定有，
 # 所以下面按「这个文件到底在不在」过滤 —— 否则 PyInstaller 会对每个缺失的
@@ -38,6 +44,10 @@ HIDDEN = [
     "save_tool", "make_envelope_save", "make_killer_captain_save",
     "make_ending_save", "make_blank_save",
     "parse_assets", "tea_decrypt", "test_roundtrip",
+    # 「装载存档前对一下难度」靠这两个包（gui.server 里是延迟 import，
+    # PyInstaller 的静态分析看不到）：patcher 读游戏当前难度，
+    # hardcore.align_save 算这份存档能不能通关。
+    "patcher", "patcher.core", "hardcore", "hardcore.align_save",
 ]
 
 
@@ -48,6 +58,30 @@ def available_hidden() -> list[str]:
         if p.with_suffix(".py").exists() or p.is_dir():
             out.append(h)
     return out
+
+
+def make_ico() -> Path | None:
+    """icon_save.png → icon_save.ico（多尺寸）。已生成且不比 png 旧就复用。"""
+    if not ICON_PNG.is_file():
+        print(f"[!] 找不到图标源 {ICON_PNG.name}，exe 用默认图标")
+        return None
+    if ICON_ICO.is_file() and ICON_ICO.stat().st_mtime >= ICON_PNG.stat().st_mtime:
+        return ICON_ICO
+    try:
+        from PIL import Image                            # noqa: PLC0415
+    except ImportError:
+        print("[!] 没装 Pillow，生成不了 .ico，exe 用默认图标")
+        return None
+    img = Image.open(ICON_PNG).convert("RGBA")
+    if max(img.size) < ICO_SIZES[-1]:
+        # 源图比 256 小的时候 Pillow 不会放大，256 那档会**直接少掉**
+        # （资源管理器「超大图标」就只能拿 128 顶）——先自己补到 256。
+        img = img.resize((ICO_SIZES[-1], ICO_SIZES[-1]), Image.LANCZOS)
+    img.save(ICON_ICO, format="ICO", sizes=[(s, s) for s in ICO_SIZES])
+    print("[i] 生成 %s：%d~%d 共 %d 档（%.1f KB）"
+          % (ICON_ICO.name, ICO_SIZES[0], ICO_SIZES[-1], len(ICO_SIZES),
+             ICON_ICO.stat().st_size / 1024))
+    return ICON_ICO
 
 
 def check_pyinstaller() -> bool:
@@ -63,6 +97,11 @@ def check_pyinstaller() -> bool:
 def build(onefile: bool, console: bool, clean: bool) -> int:
     cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--name", APP,
            "--paths", str(ROOT)]
+    # hardcore/ 里的模块是**按顶层名字**互相 import 的（align_save.py 里
+    # `from make_envelope_save import …`），不把 hardcore 本身加进搜索路径，
+    # 冻结后会 ModuleNotFoundError: No module named 'make_envelope_save'。
+    if (ROOT / "hardcore").is_dir():
+        cmd += ["--paths", str(ROOT / "hardcore")]
     if clean:
         cmd.append("--clean")
     cmd.append("--onefile" if onefile else "--onedir")
@@ -87,8 +126,38 @@ def build(onefile: bool, console: bool, clean: bool) -> int:
     else:
         print("[!] gui/presets/ 里没有预制存档，先跑：python gen_presets.py")
 
+    # 存档制作器页面（deck_state.py 生成）：服务端 /maker 直接从资源根取它
+    maker = ROOT / "deck-state.html"
+    if maker.is_file():
+        cmd += ["--add-data", f"{maker}{os.pathsep}."]
+        print(f"[i] 内置存档制作器: deck-state.html ({maker.stat().st_size // 1024} KB)")
+    else:
+        print("[!] 没有 deck-state.html，先跑：python deck_state.py")
+
+    if sys.platform == "win32":
+        ico = make_ico()
+        if ico:
+            cmd += ["--icon", str(ico)]
     if sys.platform == "darwin":
+        # macOS 要 .icns（由 _remote/build-savetool-mac.sh 用 sips+iconutil 生成）
+        icns = ROOT / "icon_save.icns"
+        if icns.is_file():
+            cmd += ["--icon", str(icns)]
+            print(f"[i] .app 图标: {icns.name}")
+        else:
+            print("[i] 没有 icon_save.icns，.app 用默认图标")
         cmd += ["--osx-bundle-identifier", BUNDLE_ID]
+
+    # 目标还在运行的时候，PyInstaller 会甩一大段 PermissionError 出来，先拦一下说人话
+    if sys.platform == "win32" and onefile:
+        target = ROOT / "dist" / (APP + ".exe")
+        if target.is_file():
+            try:
+                with open(target, "ab"):
+                    pass
+            except OSError:
+                print(f"[!] {target.name} 正被占用 —— 先关掉正在运行的存档工具，再打包")
+                return 1
     cmd.append(str(ENTRY))
 
     print("[i] " + " ".join(cmd))

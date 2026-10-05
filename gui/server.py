@@ -264,6 +264,178 @@ def _backup_source(path: str) -> str:
 
 
 # ------------------------------------------------------------------ 动作
+# ---------------------------------------------------------------- 难度（可选）
+# 存档里并不写自己的难度，只能看「已登记人数」落在哪些档位的可达链上；
+# 游戏当前的档位则要从 Assembly-CSharp.dll 里读。这两套工具都在仓库的
+# hardcore/ 与 patcher/ 里，这边只做胶水，而且**懒导入**：
+# 万一这两块不在（别人只拿了存档工具），程序照常能用，只是不做难度提醒。
+def _difficulty_tools():
+    """返回 (patcher.core, hardcore.align_save)，拿不到就给 (None, None)。"""
+    try:
+        from hardcore import align_save as al          # noqa: PLC0415
+        from patcher import core as pc                  # noqa: PLC0415
+        return pc, al
+    except Exception:                                   # noqa: BLE001
+        return None, None
+
+
+def difficulty_state(path: Path | None = None) -> dict:
+    """游戏安装目录 / 当前档位 / 这份存档能不能通关。"""
+    pc, al = _difficulty_tools()
+    if pc is None:
+        return {"available": False, "why": "找不到难度工具（patcher / hardcore）"}
+    game = pc.find_game()
+    out: dict = {"available": True,
+                 "installDir": str(game) if game else None,
+                 "installFound": game is not None,
+                 "level": None, "levelName": None, "levels": [],
+                 "compatible": None, "compatibleLevels": [], "report": ""}
+    if game is not None:
+        try:
+            info = pc.probe_dll(pc.managed_dll(game))
+            out["level"] = info.get("level")
+            out["levelName"] = pc.LEVEL_NAMES.get(info.get("level"))
+            out["dllKind"] = info.get("kind")
+        except Exception as e:                          # noqa: BLE001
+            out["why"] = "读 DLL 失败：%s: %s" % (type(e).__name__, e)
+    if out["level"] is None:
+        out.setdefault("why", "认不出游戏当前档位")
+        return out
+    out["levels"] = [{"level": k, "name": v}
+                     for k, v in sorted(pc.LEVEL_NAMES.items())]
+    if path is None:
+        return out
+    try:
+        _text, xml = al.load_save(path)
+        _crew, ship, office = al.build_zones()
+        lv_ok = al.compatible_levels(xml)
+        out["compatibleLevels"] = sorted(lv_ok)
+        out["compatible"] = out["level"] in lv_ok
+        out["report"] = "船上已登记 %d 人，办公室已登记 %d 人" % (
+            al.zone_marked(xml, ship), al.zone_marked(xml, office))
+    except Exception as e:                              # noqa: BLE001
+        out["why"] = "读存档失败：%s: %s" % (type(e).__name__, e)
+    return out
+
+
+def act_align(path: Path) -> dict:
+    """把这份存档对齐到游戏当前档位（对齐前会先备份）。"""
+    pc, _al = _difficulty_tools()
+    if pc is None:
+        raise ApiError("找不到难度工具")
+    st = difficulty_state(path)
+    if not st.get("level"):
+        raise ApiError(st.get("why") or "认不出游戏当前档位")
+    if is_preset(path):
+        raise ApiError("这是随程序发的预设，不能就地修改（先导出/导入一份再改）")
+    ok, detail, extra = pc.align_save_file(path, st["level"])
+    return {"ok": ok, "message": detail, "level": st["level"],
+            "levelName": st["levelName"], **extra}
+
+
+def pick_folder(prompt: str) -> tuple[str, str]:
+    """弹系统原生的「选择文件夹」。返回 (路径, 错误)；用户取消 = ("", "")。
+
+    不用 tk：这里是 HTTP 工作线程。提示语只能 ASCII —— PowerShell 5.1
+    按 ANSI 读命令行，中文会乱。
+    """
+    import subprocess
+    try:
+        if sys.platform == "win32":
+            ps = ("Add-Type -AssemblyName System.Windows.Forms;"
+                  "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
+                  f"$d.Description = '{prompt}';"
+                  "$d.ShowNewFolderButton = $false;"
+                  "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK)"
+                  " { [Console]::Out.Write($d.SelectedPath) }")
+            r = subprocess.run(["powershell", "-NoProfile", "-STA", "-Command", ps],
+                               capture_output=True, text=True,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        elif sys.platform == "darwin":
+            r = subprocess.run(["osascript", "-e",
+                                f'POSIX path of (choose folder with prompt "{prompt}")'],
+                               capture_output=True, text=True)
+        else:
+            return "", "这个系统还没有文件夹选择器，请把路径手动填进来"
+    except OSError as e:
+        return "", f"打不开选择器：{e}"
+    if r.returncode != 0:
+        err = (r.stderr or "").strip()
+        return ("", "") if "ancel" in err else ("", err[:200] or "选择器出错")
+    return (r.stdout or "").strip(), ""
+
+
+def act_game_dir(raw: str, detect: bool = False) -> dict:
+    """设置游戏安装目录（读难度需要它）；detect=true 时重新自动探测。"""
+    pc, _al = _difficulty_tools()
+    if pc is None:
+        raise ApiError("找不到难度工具")
+    if detect:                       # 自动探测：find_game() 会扫常见安装位置
+        found = pc.find_game()
+        if found is None:
+            raise ApiError("自动没找到游戏，请用「选择…」手动指定")
+        res = pc.set_game_dir(str(found))
+        if not res.get("ok"):
+            raise ApiError(res.get("error") or "自动找到的目录用不了")
+        return {"installDir": res["game"],
+                "message": "自动找到并记住了：%s" % res["game"]}
+    if not raw.strip():
+        raise ApiError("没有填路径")
+    res = pc.set_game_dir(raw.strip())   # 内部会 resolve（容忍 exe、.app、引号等）
+    if not res.get("ok"):
+        # core 里那段说明是按 markdown 写的（给窗式界面用），这里是纯文本提示，
+        # 把 ** 去掉，不然玩家会看到字面的星号。
+        raise ApiError((res.get("error") or "这个目录不像是游戏目录").replace("**", ""))
+    return {"installDir": res["game"],
+            "message": "已记住游戏目录：%s" % res["game"]}
+
+
+def safe_maker_name(raw: str) -> str:
+    """制作器传上来的文件名：只允许字母/数字（含汉字）/点/下划线/短横，且限 .txt。"""
+    n = Path((raw or "").strip()).name
+    if not n.lower().endswith(".txt"):
+        n += ".txt"
+    stem = n[:-4]
+    if not stem or len(n) > 96:
+        raise ApiError("文件名太长或者空了")
+    for ch in stem:
+        if not (ch.isalnum() or ch in "._-"):      # 汉字 isalnum() 为真，/ \ : 为假
+            raise ApiError("文件名里不能有「%s」" % ch)
+    return n
+
+
+def act_maker_export(b: dict) -> dict:
+    """把「存档制作器」搭出来的存档收进存档库。
+
+    落盘前先自己解一遍（load_checked），解不开就不留下——别让制作器
+    的半成品脏了玩家的存档库。写盘编码跟 save_save() 保持一致。
+    """
+    text = b.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise ApiError("存档内容是空的")
+    name = safe_maker_name(str(b.get("name") or ""))
+    lib = library_dir()
+    lib.mkdir(parents=True, exist_ok=True)
+    dst = lib / name
+    if dst.exists():
+        raise ApiError("存档库里已经有同名文件：%s" % name)
+    try:
+        with open(dst, "w", encoding="iso-8859-1", newline="") as f:
+            f.write(text)
+    except (OSError, UnicodeEncodeError) as e:
+        raise ApiError("写文件失败：%s" % e) from e
+    try:
+        load_checked(dst)
+    except Exception as e:                              # noqa: BLE001
+        try:
+            dst.unlink()
+        except OSError:
+            pass
+        raise ApiError("这份存档解不开：%s" % e) from e
+    return {"name": name, "bytes": dst.stat().st_size,
+            "message": "已导出到存档库：%s" % name}
+
+
 def act_gender(path: Path, gender: str) -> dict:
     if is_preset(path):
         raise ApiError("预制存档是只读的，换性别请先「装到 P1/P2/P3」")
@@ -398,11 +570,21 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, _html().encode("utf-8"), "text/html; charset=utf-8")
             elif u.path == "/favicon.ico":
                 self._send(204, b"", "image/x-icon")
+            elif u.path == "/maker":
+                # 存档制作器（deck_state.py 生成的页面）。前端拿 ?embed=1 打开：
+                # 藏右栏、无滚动条、只从空白档起步，改完 POST /api/maker-export。
+                p = resource_dir() / "deck-state.html"
+                if not p.is_file():
+                    raise ApiError("找不到 deck-state.html，先跑 python deck_state.py", 404)
+                self._send(200, p.read_bytes(), "text/html; charset=utf-8",
+                           {"Cache-Control": "no-store"})
             elif u.path.startswith("/fonts/"):
                 p = font_file(u.path[len("/fonts/"):])
                 ctype = "font/ttf" if p.suffix.lower() == ".ttf" else "font/otf"
+                # 不缓存：字体是本地文件，代价为零；留缓存的话重裁子集后
+                # 浏览器还会接着用旧的那份，字形「悄悄回落」根本看不出来。
                 self._send(200, p.read_bytes(), ctype,
-                           {"Cache-Control": "max-age=3600"})
+                           {"Cache-Control": "no-store"})
             elif u.path == "/api/state":
                 gd, lib = game_dir(), library_dir()
                 self._json({"ok": True,
@@ -413,7 +595,12 @@ class Handler(BaseHTTPRequestHandler):
                             "libraryDir": str(lib),
                             "slots": slots_state(),
                             "presets": presets_state(),
-                            "library": library_state()})
+                            "library": library_state(),
+                            "difficulty": difficulty_state()})
+            elif u.path == "/api/difficulty":
+                raw = (q.get("path") or [""])[0]
+                self._json({"ok": True,
+                            **difficulty_state(safe_path(raw) if raw else None)})
             elif u.path == "/api/backups":
                 slot = (q.get("slot") or [""])[0].upper()
                 if slot not in SLOTS:
@@ -450,6 +637,18 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/gender":
                 r = act_gender(safe_path(b.get("path")), b.get("gender", "toggle"))
                 return self._json({"ok": True, **r})
+            if u.path == "/api/align":
+                return self._json({"ok": True, **act_align(safe_path(b.get("path")))})
+            if u.path == "/api/game-dir":
+                return self._json({"ok": True, **act_game_dir(str(b.get("path") or ""),
+                                                             bool(b.get("detect")))})
+            if u.path == "/api/pick-dir":
+                got, err = pick_folder("Select the Obra Dinn game folder")
+                if not got:
+                    raise ApiError(err or "已取消")
+                return self._json({"ok": True, "path": got})
+            if u.path == "/api/maker-export":
+                return self._json({"ok": True, **act_maker_export(b)})
             if u.path == "/api/import":
                 slot = str(b.get("slot", "")).upper()
                 if slot not in SLOTS:

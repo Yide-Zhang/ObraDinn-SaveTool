@@ -27,18 +27,21 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>OBRA DINN · 存档工具</title>
 <style>
+/* 这是工具界面，不是文档：所有文字都不给选中 */
+*{user-select:none;-webkit-user-select:none}
 /* ---------------- 字体 ----------------
    gui/fonts/ 下两款：英文字母优先 IMFe（IM FELL English Roman），
    中文/日文及其他 IMFe 没有的字形自动回落到 Source Han Serif SC。
    子集化等工作等项目成熟后再做。 */
 @font-face{
   font-family:"IMFe";
-  src:url("/fonts/IMFeENrm28P.ttf") format("truetype");
+  /* ?v=3：又重裁过一次子集（新增「存档制作器」等文案），版本号顶掉浏览器缓存 */
+  src:url("/fonts/IMFeENrm28P.ttf?v=3") format("truetype");
   font-weight:400;font-style:normal;font-display:swap;
 }
 @font-face{
   font-family:"SourceHanSerif";
-  src:url("/fonts/SourceHanSerifSC-SemiBold-subset.otf") format("opentype");
+  src:url("/fonts/SourceHanSerifSC-SemiBold-subset.otf?v=3") format("opentype");
   font-weight:400;font-style:normal;font-display:swap;
 }
 
@@ -283,6 +286,25 @@ td.act{text-align:right;white-space:nowrap}
   font-size:var(--fs-sm);max-width:var(--w-toast);
 }
 #toast div.err{border-style:dashed}
+/* ---------- 难度不同步的提醒（装载存档前弹） ---------- */
+.dmod{position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:60;
+      display:flex;align-items:center;justify-content:center}
+.dbox{background:var(--d);color:var(--l);border:1px solid var(--l-30);
+      max-width:min(26em,86vw);padding:calc(var(--u)*1.1) calc(var(--u)*1.2);
+      box-shadow:0 12px 40px rgba(0,0,0,.55);font-size:var(--fs)}
+.dbox p{margin:0 0 .7em}
+.dwarn{font-weight:700}
+.dsub{color:var(--l-50);font-size:calc(var(--fs)*.86);line-height:1.7;
+      white-space:pre-line}
+.dacts{display:flex;gap:.7em;margin-top:1.2em}
+.dacts button{flex:1;font-family:var(--font);font-size:var(--fs);color:var(--l);
+      background:transparent;border:1px solid var(--l-30);padding:.55em 0;cursor:pointer}
+/* hover 交给全局的 button:hover:not(:disabled)（白底黑字），别在这里覆盖 */
+/* 页头那行「游戏安装目录」 */
+.gdline{color:var(--l-50);font-size:calc(var(--fs)*.86);margin:.35em 0 0}
+.gdline button{font-family:var(--font);font-size:inherit;color:var(--l-72);
+      background:transparent;border:1px solid var(--l-18);padding:.12em .6em;
+      margin-left:.45em;cursor:pointer}
 </style>
 </head>
 <body>
@@ -290,7 +312,7 @@ td.act{text-align:right;white-space:nowrap}
 
   <header>
     <div>
-      <h1>Obra Dinn · 存档工具</h1>
+      <h1>《奥伯拉丁的回归》存档工具</h1>
       <div class="sub" id="sub">正在读取…</div>
     </div>
     <div class="tools">
@@ -300,6 +322,7 @@ td.act{text-align:right;white-space:nowrap}
         <button onclick="zoom(1)" title="放大">A+</button>
       </div>
       <input type="file" id="up" accept=".txt" hidden>
+      <button onclick="location.href='/maker?embed=1'">存档制作器</button>
       <button onclick="document.getElementById('up').click()">导入文件到存档库</button>
       <button onclick="refresh(true)">重新读取</button>
       <button onclick="doQuit()">退出程序</button>
@@ -423,7 +446,8 @@ function card(row, kind, tag){
        <button onclick="doImport('P2','${p}')">装到 P2</button>
        <button onclick="doImport('P3','${p}')">装到 P3</button>`;
   const acts = kind === 'slot'
-    ? `<button onclick="doExport('${p}')">导出到存档库</button>
+    ? `<button onclick="doSyncDiff('${p}')">同步难度</button>
+       <button onclick="doExport('${p}')">导出到存档库</button>
        <button onclick="dl('${p}')">下载</button>
        <button onclick="doGender('${p}')">切换性别</button>
        <button onclick="openDetail('${p}')">详细信息</button>`
@@ -505,6 +529,7 @@ function render(st){
   $('#sub').innerHTML = '存档目录 <b>' + esc(st.saveDir) + '</b>'
     + (st.saveDirExists ? '' : ' <span class="pill">不存在</span>');
   $('#libpath').textContent = st.libraryDir;
+  renderGameDir(st);
 
   $('#slots').innerHTML = st.slots.map(s => card(s, 'slot', s.slot)).join('');
 
@@ -567,8 +592,115 @@ function busy(fn){
   };
 }
 
+/* ---- 装载前的难度检查 ----
+   存档里并不写自己的难度，只能看「已登记人数」落在哪些档位的可达链上；
+   游戏当前档位要从 Assembly-CSharp.dll 读（工具在 hardcore/ 与 patcher/ 里，
+   缺了这两个模块时 /api/difficulty 会报 available:false，这里就不拦人）。 */
+function askDifficultySync(d){
+  return new Promise(resolve => {
+    const w = document.createElement('div');
+    w.className = 'dmod';
+    const box = document.createElement('div');
+    box.className = 'dbox';
+    const p1 = document.createElement('p');
+    p1.textContent = '检测到您的存档和当前游戏难度不匹配。是否同步？';
+    const p2 = document.createElement('p');
+    p2.className = 'dwarn';
+    p2.textContent = '否则您将无法通关！';
+    const p3 = document.createElement('p');
+    p3.className = 'dsub';
+    p3.textContent = '游戏当前难度：' + (d.levelName || d.level) +
+      '\n这份存档兼容：' + ((d.compatibleLevels || []).join('、') || '（算不出来）') +
+      (d.report ? '\n' + d.report : '');
+    const acts = document.createElement('div');
+    acts.className = 'dacts';
+    const yes = document.createElement('button');
+    yes.textContent = '是';
+    const no = document.createElement('button');
+    no.textContent = '否';
+    acts.append(yes, no);
+    box.append(p1, p2, p3, acts);
+    w.appendChild(box);
+    document.body.appendChild(w);
+    yes.onclick = () => { w.remove(); resolve(true); };
+    no.onclick  = () => { w.remove(); resolve(false); };
+  });
+}
+
+async function ensureDifficulty(path){
+  let d;
+  try { d = await api('/api/difficulty?path=' + encodeURIComponent(path)); }
+  catch(e){ return; }                          // 探测不了就别拦人
+  if (!d.available || d.compatible !== false) return;
+  if (!await askDifficultySync(d)) return;     // 选「否」也照旧装载
+  const r = await api('/api/align', {path});
+  toast('已同步到「' + (r.levelName || r.level) + '」· ' + r.message);
+  await refresh();
+}
+
+/* ---- 游戏安装目录：读「当前难度」需要它（工具在 hardcore/ 与 patcher/ 里） ---- */
+async function pickGameDir(){
+  try {
+    const r = await api('/api/pick-dir', {});
+    const g = await api('/api/game-dir', {path: r.path});
+    toast(g.message);
+    await refresh();
+  } catch(e){ toast(e.message, true); }
+}
+
+async function detectGameDir(){
+  try {
+    const g = await api('/api/game-dir', {detect: true});
+    toast(g.message);
+    await refresh();
+  } catch(e){ toast(e.message, true); }
+}
+
+function renderGameDir(st){
+  const d = (st && st.difficulty) || {};
+  const anchor = document.getElementById('libpath');
+  if (!anchor) return;
+  let el = document.getElementById('gdline');
+  if (!el){
+    el = document.createElement('div');
+    el.id = 'gdline';
+    el.className = 'gdline';
+    anchor.after(el);
+  }
+  el.textContent = '';
+  const t = document.createElement('span');
+  t.innerHTML = '游戏安装目录 <b>' + esc(d.installDir || '（没找到）') + '</b>' +
+    (d.levelName ? ' · 当前难度 <b>' + esc(d.levelName) + '</b>' : '') +
+    (d.available === false ? '  <span class="pill">缺难度工具</span>' : '');
+  const b1 = document.createElement('button');
+  b1.textContent = '选择…';
+  b1.onclick = pickGameDir;
+  const b2 = document.createElement('button');
+  b2.textContent = '自动检测';
+  b2.onclick = detectGameDir;
+  el.append(t, b1, b2);
+}
+
+/* 槽位上的「同步难度」：和装载存档时走同一套判断与浮层 */
+const doSyncDiff = busy(async (path) => {
+  const d = await api('/api/difficulty?path=' + encodeURIComponent(path));
+  if (!d.available){
+    toast('这台机器上找不到难度工具（patcher / hardcore）', true);
+    return;
+  }
+  if (d.compatible !== false){
+    toast('这份存档和当前难度「' + (d.levelName || d.level) + '」已经一致');
+    return;
+  }
+  if (!await askDifficultySync(d)) return;
+  const r = await api('/api/align', {path});
+  toast('已同步到「' + (r.levelName || r.level) + '」· ' + r.message);
+  await refresh();
+});
+
 const doImport = busy(async (slot, path) => {
   if (!confirm('把这份存档写入游戏槽位 ' + slot + '？\n原内容会先自动备份。')) return;
+  await ensureDifficulty(path);
   const r = await api('/api/import', {slot, path});
   toast('已装入 ' + slot + '（' + r.bytes + ' B）· 备份 ' + r.backups.length + ' 份');
   await refresh();
@@ -596,6 +728,7 @@ const doDelete = busy(async (path) => {
 
 const doRestore = busy(async (slot, path) => {
   if (!confirm('用这份备份覆盖槽位 ' + slot + '？\n当前内容会先自动备份。')) return;
+  await ensureDifficulty(path);
   const r = await api('/api/import', {slot, path});
   toast('已从备份恢复 ' + slot);
   await refresh();
