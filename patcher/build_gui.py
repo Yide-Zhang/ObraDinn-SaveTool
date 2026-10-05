@@ -11,6 +11,9 @@
 langtool.exe 也就在旁边看得见；单文件每次启动都要把这些解到临时目录，
 既慢又容易撞上杀软。
 
+（发布用的 Windows 包就是 `--onefile` 打的：实测首次可用约 2 秒、19.7 MB、
+解压出来只有一个 exe；目录版仍保留为默认值，调试时能直接看见 langtool.exe。）
+
 产物：
     dist/ObraDinnDifficultyPatcher/ObraDinnDifficultyPatcher[.exe]
 """
