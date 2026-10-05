@@ -27,6 +27,13 @@ ROOT = PATCHER_DIR.parent
 ENTRY = ROOT / "run_patch_gui.py"
 APP = "ObraDinnDifficultyPatcher"
 
+#: exe 图标：由 icon-difficulty.png 生成。**必须含 16×16** —— 资源管理器
+#: 「小图标」视图只认那一档，缺了就回落成 PyInstaller 的默认图标。
+ICON_PNG = ROOT / "icon-difficulty.png"
+ICON_ICO = ROOT / "icon-difficulty.ico"
+ICON_ICNS = ROOT / "icon-difficulty.icns"
+ICO_SIZES = (16, 24, 32, 48, 64, 128, 256)
+
 # PyInstaller 静态分析跟不到的（动态 import / 条件 import）
 HIDDEN = (
     "patcher", "patcher.core", "patcher.server", "patcher.web",
@@ -187,6 +194,29 @@ def preflight() -> bool:
     return ok
 
 
+def make_ico() -> Path | None:
+    """icon-difficulty.png → icon-difficulty.ico（多尺寸）。已生成且不比 png 旧就复用。"""
+    if not ICON_PNG.is_file():
+        print("[!] 找不到图标源 %s，exe 用默认图标" % ICON_PNG.name)
+        return None
+    if ICON_ICO.is_file() and ICON_ICO.stat().st_mtime >= ICON_PNG.stat().st_mtime:
+        return ICON_ICO
+    try:
+        from PIL import Image                                  # noqa: PLC0415
+    except ImportError:
+        print("[!] 没装 Pillow，生成不了 .ico，exe 用默认图标")
+        return None
+    img = Image.open(ICON_PNG).convert("RGBA")
+    if max(img.size) < ICO_SIZES[-1]:
+        # 源图比 256 小的时候 Pillow 不会放大，256 那档会**直接少掉**
+        img = img.resize((ICO_SIZES[-1], ICO_SIZES[-1]), Image.LANCZOS)
+    img.save(ICON_ICO, format="ICO", sizes=[(s, s) for s in ICO_SIZES])
+    print("  图标: %s（%d~%d 共 %d 档，%.1f KB）"
+          % (ICON_ICO.name, ICO_SIZES[0], ICO_SIZES[-1], len(ICO_SIZES),
+             ICON_ICO.stat().st_size / 1024))
+    return ICON_ICO
+
+
 def build(onefile: bool, console: bool, clean: bool) -> int:
     if not check_pyinstaller():
         return 2
@@ -210,6 +240,17 @@ def build(onefile: bool, console: bool, clean: bool) -> int:
             return 2
         cmd += ["--add-data", "%s%s%s" % (p, os.pathsep, dst)]
         print("  打包资源: %-34s -> %s" % (src, dst))
+
+    if sys.platform == "win32":
+        ico = make_ico()
+        if ico:
+            cmd += ["--icon", str(ico)]
+    elif sys.platform == "darwin":
+        if ICON_ICNS.is_file():
+            cmd += ["--icon", str(ICON_ICNS)]
+            print("  图标: %s" % ICON_ICNS.name)
+        else:
+            print("[i] 没有 %s，.app 用默认图标" % ICON_ICNS.name)
 
     cmd.append(str(ENTRY))
     print()

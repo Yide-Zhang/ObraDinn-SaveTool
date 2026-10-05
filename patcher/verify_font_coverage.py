@@ -73,7 +73,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--chars", default=None, help="额外逐字检查这几个字符")
     a = ap.parse_args(argv)
     d = Path(a.dir) if a.dir else FONT_DIR
-    lat_p, cjk_p = d / FONTS[0], d / FONTS[1]
+    # FONTS 是 {输出文件名: 基准原件} 的 dict，别再按下标取（以前写 FONTS[0]，
+    # dict 化之后直接 KeyError）。按名字挑，跟顺序无关。
+    keys = list(FONTS)
+    lat_p = d / next(n for n in keys if "imfe" in n.lower())
+    cjk_p = d / next(n for n in keys if "sourcehan" in n.lower())
 
     print("[i] 字体目录: %s" % d)
     for p in (lat_p, cjk_p):
